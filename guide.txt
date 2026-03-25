@@ -78,7 +78,7 @@ cd /home/$name
 python3 -m venv ~/cms_venv
 cd cms
 source ~/cms_venv/bin/activate
-pip install --upgrade setuptools
+pip install --upgrade "setuptools<70"
 pip install --upgrade wheel pip
 pip install -r requirements.txt
 pip install --no-build-isolation .
