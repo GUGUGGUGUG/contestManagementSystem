@@ -1,0 +1,205 @@
+#=====================================BEGIN=====================================
+Install dependencies
+#=====================================BEGIN=====================================
+
+#Install Dependecies
+
+sudo apt update && sudo apt upgrade
+
+sudo apt-get install \
+    build-essential openjdk-11-jdk-headless fp-compiler nginx \
+    postgresql postgresql-client python3.12 cppreference-doc-en-html \
+    cgroup-lite libcap-dev zip make libsystemd-dev pkg-config
+
+sudo apt-get install \
+    python3.12-dev libpq-dev libcups2-dev libyaml-dev \
+    libffi-dev python3-pip
+
+sudo apt-get install \
+    nginx-full php-cli texlive-latex-base \
+    a2ps ghc rustc mono-mcs pypy3
+
+#Fix some error
+sudo apt install build-essential python3-babel python3-polib
+sudo apt install build-essential libcap-dev pkg-config libsystemd-dev
+sudo apt install python3.10-venv
+sudo apt-get install python3-venv
+sudo apt install libpq-dev
+sudo apt install python3-dev libpq-dev libcups2-dev build-essential
+
+
+#Create new user (non-root required)
+
+echo "Enter your name"
+read name
+echo "Enter your server"
+read server
+adduser $name
+sudo adduser $name sudo
+
+#Connect to that user
+ssh $name@$server
+
+#=====================================END=====================================
+#Optional : sudo reboot
+#=====================================BEGIN=====================================
+Clone github
+#=====================================BEGIN=====================================
+
+
+#Get info
+echo "Enter your name"
+read name
+
+#Download cms
+cd /home/$name
+wget https://github.com/cms-dev/cms/releases/download/v1.5.1/v1.5.1.tar.gz
+tar -xzf v1.5.1.tar.gz
+cd cms
+
+#Install cms
+sudo python3 prerequisites.py install
+
+#=====================================END=====================================
+#Require : exit
+#Require : ssh $name@$server
+#=====================================BEGIN=====================================
+Build database
+#=====================================BEGIN=====================================
+
+#Get info
+echo "Enter your name"
+read name
+echo "Enter your server"
+read server
+
+#Install pip
+cd /home/$name
+python3 -m venv ~/cms_venv
+cd cms
+source ~/cms_venv/bin/activate
+pip install --upgrade setuptools
+pip install --upgrade wheel pip
+pip install -r requirements.txt
+pip install --no-build-isolation .
+
+
+#Create db
+sudo su - postgres
+createuser --username=postgres --pwprompt cmsuser
+createdb --username=postgres --owner=cmsuser cmsdb
+psql --username=postgres --dbname=cmsdb --command='ALTER SCHEMA public OWNER TO cmsuser'
+psql --username=postgres --dbname=cmsdb --command='GRANT SELECT ON pg_largeobject TO cmsuser'
+logout
+
+
+#Update cms.conf
+set -euo pipefail
+CONF_FILE="/usr/local/etc/cms.conf"
+# Sanity check
+if [[ ! -f "$CONF_FILE" ]]; then
+  echo "Error: Configuration file not found at $CONF_FILE" >&2
+  exit 1
+fi
+read -rsp "Enter new password for cmsuser: " new_password
+echo
+sudo sed -i.bak \
+  "s|postgresql+psycopg2://cmsuser:your_password_here|postgresql+psycopg2://cmsuser:${new_password}|g" \
+  "$CONF_FILE"
+
+
+
+
+#Create Service
+
+echo "Enter your name for cmsAdmin"
+read name
+echo "Enter your password for cmsAdmin"
+read pass
+cmsAddAdmin $name -p $pass
+
+#!/usr/bin/env bash
+#do not forget to change PC_USER_NAME to name
+set -euo pipefail
+
+declare -A extras=(
+  [cmsEvaluationService]="-c 1"
+  [cmsContestWebServer]="-c 1"
+)
+
+services=(
+  cmsLogService
+  cmsResourceService
+  cmsScoringService
+  cmsWorker
+  cmsEvaluationService
+  cmsContestWebServer
+  cmsChecker
+  cmsAdminWebServer
+)
+
+for svc in "${services[@]}"; do
+  sudo tee "/etc/systemd/system/${svc}.service" > /dev/null <<EOF
+[Unit]
+Description=${svc//([A-Z])/ \1} Service
+After=network.target postgresql.service
+
+[Service]
+User=PC_USER_NAME
+ExecStart=/home/PC_USER_NAME/cms_venv/bin/${svc} ${extras[$svc]:-}
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+done
+
+sudo systemctl daemon-reload
+sudo systemctl enable "${services[@]/%/.service}"
+sudo systemctl start  "${services[@]/%/.service}"
+
+
+#Setup nginx
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+read -p "Enter your admin site domain for nginx: " ADMIN_DOMAIN
+read -p "Enter your contest site domain for nginx: " CONTEST_DOMAIN
+
+NGINX_SITES_AVAILABLE="/etc/nginx/sites-available"
+NGINX_SITES_ENABLED="/etc/nginx/sites-enabled"
+
+create_site() {
+  domain="$1"
+  port="$2"
+  conf="${NGINX_SITES_AVAILABLE}/${domain}.conf"
+
+  sudo tee "${conf}" > /dev/null <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${domain};
+    ssl_certificate /etc/ssl/certs/ssl-cert-snakeoil.pem;
+    ssl_certificate_key /etc/ssl/private/ssl-cert-snakeoil.key;
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        include proxy_params;
+    }
+}
+EOF
+
+  [[ -e "${NGINX_SITES_ENABLED}/${domain}.conf" ]] || \
+    sudo ln -s "${conf}" "${NGINX_SITES_ENABLED}/"
+}
+
+create_site "${ADMIN_DOMAIN}" 8889
+create_site "${CONTEST_DOMAIN}" 8888
+
+sudo nginx -t
+sudo systemctl reload nginx
+
+
+echo "ALL DONE!! PLEASE UPDATE SECRET KEY IN /usr/local/etc/cms.conf"
